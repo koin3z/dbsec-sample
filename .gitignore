@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Local secrets and connection material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.sso
+wallet/
+
+TREE.txt
+prompts/
+docs/
+AGENTS.md
+
+# Virtual environments
+.venv/
+notebooks/__marimo__/

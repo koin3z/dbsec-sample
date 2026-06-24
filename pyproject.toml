@@ -1,0 +1,22 @@
+[project]
+name = "dbsec-samples"
+version = "0.1.0"
+description = "Oracle Deep Data Security direct-logon marimo demo"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo",
+    "oracledb",
+    "pandas",
+    "python-dotenv",
+    "rich",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

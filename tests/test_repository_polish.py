@@ -32,10 +32,14 @@ def test_env_example_uses_only_placeholders_for_secret_like_values() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert "ORACLE_ADMIN_PASSWORD=change_me" in env_example
     assert "DEMO_DEFAULT_PASSWORD=change_me" in env_example
-    assert "APP_DB_PASSWORD=change_me" in env_example
-    assert "APP_DATABASE_ACCESS_TOKEN=" in env_example
-    assert "APP_END_USER_CONTEXT_KEY=" in env_example
-    assert "TODO" in env_example
+    assert "APP_DB_PASSWORD=" in env_example
+    assert "IDENTITY_DOMAIN_DATABASE_CLIENT_SECRET=change_me" in env_example
+    assert "DEMO_APP_CLIENT_SECRET=change_me" in env_example
+    assert "DEMO_APP_GRANT_TYPES=client_credentials" in env_example
+    assert "APP_DATABASE_ACCESS_TOKEN" not in env_example
+    assert "APP_END_USER_CONTEXT_KEY=change_me" in env_example
+    assert "APP_SECURITY_CONTEXT_MODE=identity_domain_client_credentials" in env_example
+    assert "APP_DATA_ROLES=APP_DIRECTORY_LOOKUP_ROLE,APP_SENSITIVE_LOOKUP_ROLE" in env_example
 
 
 def test_gitignore_excludes_local_env_and_wallet_material() -> None:

@@ -47,6 +47,14 @@ def test_safe_error_hint_mentions_ora_01017_checks() -> None:
     assert "sql/03_create_end_users.sql" in hint
     assert "sql/04_create_data_roles.sql" in hint
 
+def test_safe_error_hint_mentions_tcps_for_bequeath_dpy_3001() -> None:
+    hint = safe_error_hint(
+        Exception("DPY-3001: bequeath is only supported in python-oracledb thick mode")
+    )
+    assert "ORACLE_PROTOCOL=tcps" in hint
+    assert "TCPS" in hint
+
+
 def test_sensitive_focus_dataframe_highlights_sensitive_columns() -> None:
     result = QueryResult(
         columns=("employee_id", "display_name", "salary_amount", "personal_id"),

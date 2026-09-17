@@ -175,6 +175,12 @@ def safe_error_hint(exc: Exception) -> str:
             " `.env` の `DEMO_DEFAULT_PASSWORD`、`sql/03_create_end_users.sql`、"
             "`sql/04_create_data_roles.sql` が主な確認箇所です。"
         )
+    if "DPY-3001" in message and "bequeath" in message:
+        return (
+            "DPY-3001: thin mode では bequeath 接続を使えません。"
+            " Phase 2 の client_credentials / DDS context は ORACLE_PROTOCOL=tcps "
+            "と TCPS listener/port を確認してください。"
+        )
     if "DPY-3001" in message:
         return "DPY-3001: 接続先が Native Network Encryption / Data Integrity を要求しています。Thick mode 設定を確認してください。"
     if "DPI-1047" in message:

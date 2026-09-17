@@ -27,7 +27,11 @@ def _():
 
     import marimo as mo
 
-    from deepsec_demo.app_mediated import query_as_end_user_via_app
+    from deepsec_demo.app_mediated import (
+        build_end_user_context_provider,
+        query_as_end_user_via_app,
+    )
+    from deepsec_demo.app_mediated_status import check_shared_app_connection
     from deepsec_demo.config import ConfigError, load_app_mediated_config
     from deepsec_demo.personas import get_persona, persona_dropdown_key, persona_dropdown_options
     from deepsec_demo.queries import CANONICAL_EMPLOYEE_QUERY
@@ -42,11 +46,13 @@ def _():
         CANONICAL_EMPLOYEE_QUERY,
         ConfigError,
         UnsafeSqlError,
+        check_shared_app_connection,
         datetime,
         get_persona,
         grant_markdown,
         load_app_mediated_config,
         mo,
+        build_end_user_context_provider,
         normalize_select_sql,
         perf_counter,
         persona_dropdown_key,
@@ -62,7 +68,7 @@ def _(mo):
     mo.md("""
     # Oracle Deep Data Security Phase 2: application-mediated
 
-    この notebook は共有アプリケーション DB ユーザーで接続し、選択したエンドユーザーの security context を問い合わせ直前に付与します。問い合わせ後は必ず context を解除し、接続に前回ユーザーの context を残さないことを確認します。
+    この notebook は共有アプリケーション DB ユーザーで接続し、Identity Domain の OAuth client credentials で取得した database-access token を使って、選択したエンドユーザーの DDS security context を attach する Phase 2 デモです。provider が未設定の場合は fail-closed し、protected query は実行しません。
 
     ```text
     marimo / Python app
@@ -77,16 +83,15 @@ def _(mo):
 
 
 @app.cell
-def _(ConfigError, load_app_mediated_config, mo):
+def _(ConfigError, build_end_user_context_provider, load_app_mediated_config, mo):
     try:
         _demo_config, _app_config = load_app_mediated_config()
-        _token_status = "設定済み" if _app_config.database_access_token else "未設定"
-        _key_status = "設定済み" if _app_config.end_user_context_key else "未設定"
+        _phase2_provider = build_end_user_context_provider(_app_config)
         _attributes_status = "設定済み" if _app_config.context_attributes else "未設定"
-        _status_kind = (
-            "info"
-            if _app_config.database_access_token and _app_config.end_user_context_key
-            else "warn"
+        _provider_note = (
+            "Identity Domain client credentials provider が設定されています。protected query 実行前に `ORA_END_USER_CONTEXT.username` を検証します。"
+            if _phase2_provider.supports_real_dds_context
+            else f"provider は未有効です: `{getattr(_phase2_provider, 'disabled_reason', 'provider disabled')}`"
         )
         app_config_status = mo.callout(
             mo.md(
@@ -94,16 +99,18 @@ def _(ConfigError, load_app_mediated_config, mo):
                 ### Phase 2 設定
 
                 - 共有 DB ユーザー: `{_app_config.app_username}`
+                - DB auth mode: `{_app_config.app_auth_mode}`
                 - security context mode: `{_app_config.security_context_mode}`
                 - driver mode: `{_demo_config.driver_mode}`
-                - database access token: `{_token_status}`
-                - local end-user context key: `{_key_status}`
+                - context provider: `{_phase2_provider.mode}`
+                - provider verified: `{_phase2_provider.supports_real_dds_context}`
+                - application data roles: `{', '.join(getattr(_phase2_provider, 'data_roles', ())) or '未設定'}`
                 - context attributes: `{_attributes_status}`
 
-                token と context key の実値は表示しません。未設定の場合、実行時に設定エラーとして止まります。
+                {_provider_note}
                 """
             ),
-            kind=_status_kind,
+            kind="info" if _phase2_provider.supports_real_dds_context else "warn",
         )
     except ConfigError as exc:
         app_config_status = mo.callout(
@@ -113,12 +120,84 @@ def _(ConfigError, load_app_mediated_config, mo):
 
                 `{exc}`
 
-                `.env.example` の Phase 2 セクションを `.env` に反映してください。token や context key は対象環境の公式手順で取得した値を設定します。
+                `.env.example` の Phase 2 セクションを `.env` に反映してください。access token 自体は `.env` に保存しません。
                 """
             ),
             kind="warn",
         )
     app_config_status
+    return
+
+@app.cell
+def _(mo):
+    check_app_connection = mo.ui.run_button(
+        label="共有DBユーザー接続を確認",
+        kind="neutral",
+    )
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ## 1. 共有DBユーザー接続確認
+
+                `DEEPSEC_APP` で接続できることだけを確認します。保護対象テーブルへの SELECT は実行しません。
+                """
+            ),
+            check_app_connection,
+        ]
+    )
+    return (check_app_connection,)
+
+
+@app.cell
+def _(
+    ConfigError,
+    check_app_connection,
+    check_shared_app_connection,
+    load_app_mediated_config,
+    mo,
+):
+    mo.stop(
+        not check_app_connection.value,
+        mo.md("共有DBユーザー接続確認はボタンを押すまで実行されません。"),
+    )
+    try:
+        _demo_config, _app_config = load_app_mediated_config()
+        _status = check_shared_app_connection(_demo_config, _app_config)
+        _dds_detail = (
+            f"- ORA_END_USER_CONTEXT.username query error: `{_status.dds_query_error}`"
+            if _status.dds_query_error
+            else f"- ORA_END_USER_CONTEXT.username: `{_status.dds_username}`"
+        )
+        app_connection_status = mo.callout(
+            mo.md(
+                f"""
+                ### 共有DBユーザー接続ステータス
+
+                - expected shared DB user: `{_status.shared_db_user}`
+                - session user: `{_status.session_user}`
+                - current user: `{_status.current_user}`
+                - connected as expected: `{_status.connected_as_expected}`
+                {_dds_detail}
+
+                active DDS context がない状態で protected SELECT は実行しません。
+                """
+            ),
+            kind="info" if _status.connected_as_expected else "warn",
+        )
+    except ConfigError as exc:
+        app_connection_status = mo.callout(
+            mo.md(f"Phase 2 設定エラー: `{exc}`"),
+            kind="warn",
+        )
+    except Exception as exc:
+        app_connection_status = mo.callout(
+            mo.md(
+                f"共有DBユーザー接続確認に失敗しました: `{type(exc).__name__}: {exc}`"
+            ),
+            kind="danger",
+        )
+    app_connection_status
     return
 
 
@@ -130,7 +209,7 @@ def _(mo, persona_dropdown_key, persona_dropdown_options):
         label="エンドユーザー",
         full_width=True,
     )
-    mo.vstack([mo.md("## 1. エンドユーザー選択"), app_persona_select])
+    mo.vstack([mo.md("## 2. エンドユーザー選択"), app_persona_select])
     return (app_persona_select,)
 
 
@@ -147,15 +226,39 @@ def _(app_persona_select, get_persona, grant_markdown, mo, persona_markdown):
 
 
 @app.cell
-def _(CANONICAL_EMPLOYEE_QUERY, mo):
-    run_app_query = mo.ui.run_button(label="app-mediated 共通SQLを実行", kind="success")
+def _(
+    CANONICAL_EMPLOYEE_QUERY,
+    ConfigError,
+    build_end_user_context_provider,
+    load_app_mediated_config,
+    mo,
+):
+    try:
+        _demo_config, _app_config = load_app_mediated_config()
+        _phase2_provider = build_end_user_context_provider(_app_config)
+        _provider_ready = _phase2_provider.supports_real_dds_context
+        _disabled_reason = getattr(_phase2_provider, "disabled_reason", "provider disabled")
+    except ConfigError as exc:
+        _provider_ready = False
+        _disabled_reason = str(exc)
+    run_app_query = mo.ui.run_button(
+        label="app-mediated 共通SQLを実行" if _provider_ready else "app-mediated 共通SQLを実行（未設定）",
+        kind="neutral" if _provider_ready else "warn",
+        disabled=not _provider_ready,
+        tooltip="Identity Domain provider 設定済み" if _provider_ready else _disabled_reason,
+    )
+    _execution_note = (
+        "Identity Domain provider が設定されているため、実行時に context attach / verify / query / clear を行います。"
+        if _provider_ready
+        else "Identity Domain provider が未設定のため、ボタンは無効です。"
+    )
     mo.vstack(
         [
             mo.md(
-                """
-                ## 2. 実行するSQL
+                f"""
+                ## 3. 実行するSQL
 
-                direct logon 版と同じ SELECT を使います。アプリ側で行・列・セルを加工せず、Oracle Database 側の Deep Data Security Data Grant が見え方を決めます。
+                direct logon 版と同じ SELECT を使います。アプリ側で行・列・セルを加工せず、Oracle Database 側の Deep Data Security Data Grant が見え方を決めます。{_execution_note}
                 """
             ),
             mo.md(f"```sql\n{CANONICAL_EMPLOYEE_QUERY}\n```"),
@@ -163,7 +266,6 @@ def _(CANONICAL_EMPLOYEE_QUERY, mo):
         ]
     )
     return (run_app_query,)
-
 
 @app.cell
 def _(
@@ -227,7 +329,7 @@ def _(
 
                 `{exc}`
 
-                `.env` の Phase 2 設定、`ORACLE_DRIVER_MODE=thin`、database access token、local end-user context key を確認してください。
+                `.env` の Phase 2 設定を確認してください。access token 自体は `.env` に保存しません。
                 """
             ),
             kind="warn",
@@ -241,7 +343,7 @@ def _(
                 - 選択エンドユーザー: `{selected_end_user.db_username}` / {selected_end_user.label_ja}
                 - エラー種別: `{type(exc).__name__}`
 
-                秘密情報、token、security context payload は表示していません。共有 DB ユーザー、Phase 1 SQL セットアップ、Data Role / Data Grant、対象環境の security context provider 設定を確認してください。
+                秘密情報や security context payload は表示していません。共有 DB ユーザー、Phase 1 SQL セットアップ、Data Role / Data Grant、対象環境の context 注入方式を確認してください。
                 """
             ),
             kind="danger",
@@ -257,14 +359,14 @@ def _(mo):
             "Phase 2 の前提": mo.md(
                 """
                 - Phase 1 の SQL セットアップが完了していること。
-                - `APP_DATABASE_ACCESS_TOKEN` と `APP_END_USER_CONTEXT_KEY` は対象環境の公式手順で取得した値を使うこと。
-                - この notebook は production token cache、OAuth flow、接続プール、IAM 管理自動化を実装しません。
+                - この notebook は Identity Domain client credentials で database-access token を取得し、公式 python-oracledb API で DDS context payload を attach します。
+                - production token cache、接続プール、IAM 管理自動化は実装しません。
                 - 前のユーザーの context が接続に残ると権限境界が崩れるため、実行後の clear 状態を必ず確認します。
                 """
             ),
             "接続モード": mo.md(
                 """
-                python-oracledb の end-user security context payload API は Thin mode を前提にしています。接続先が Native Network Encryption などで Thick mode を必須にする場合は、Phase 2 用に Thin mode で接続できるサービスまたは Oracle 公式手順に沿った別構成を使います。
+                python-oracledb の application-mediated DDS API は EndUserSecurityContext payload を connection に attach する方式です。このデモでは local database user の identity tuple と Identity Domain database-access token を使います。
                 """
             ),
         }

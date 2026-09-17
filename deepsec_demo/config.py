@@ -50,11 +50,18 @@ class AdminConfig:
 @dataclass(frozen=True)
 class AppMediatedConfig:
     app_username: str
-    app_password: str = field(repr=False)
+    app_password: str = field(default="", repr=False)
+    app_auth_mode: str = "password"
     security_context_mode: str = "local"
-    database_access_token: str | None = field(default=None, repr=False)
-    end_user_context_key: str | None = field(default=None, repr=False)
     context_attributes: dict[str, object] = field(default_factory=dict)
+    identity_domain_url: str | None = None
+    demo_app_token_url: str | None = None
+    demo_app_client_id: str | None = None
+    demo_app_client_secret: str | None = field(default=None, repr=False)
+    demo_app_database_scope: str | None = None
+    end_user_context_key: str | None = field(default=None, repr=False)
+    application_data_roles: tuple[str, ...] = ()
+    token_request_timeout: int = 10
 
 
 def _load_dotenv(env_file: str | Path | None) -> None:
@@ -75,6 +82,13 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer.") from exc
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    value = _env(name)
+    if not value:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def load_config(env_file: str | Path | None = ".env") -> DemoConfig:
@@ -140,29 +154,94 @@ def _env_json_object(name: str) -> dict[str, object]:
     return parsed
 
 
+def _normalized_context_mode() -> str:
+    mode = _env("APP_SECURITY_CONTEXT_MODE", "local").lower()
+    if mode == "client_credentials":
+        return "identity_domain_client_credentials"
+    if mode not in {"local", "identity_domain_client_credentials"}:
+        raise ConfigError(
+            "APP_SECURITY_CONTEXT_MODE must be local or "
+            "identity_domain_client_credentials."
+        )
+    return mode
+
+
+def _application_data_roles_from_env() -> tuple[str, ...]:
+    explicit_roles = _env_csv("APP_DATA_ROLES")
+    if explicit_roles:
+        return explicit_roles
+    return tuple(
+        role
+        for role in (
+            _env("PHASE2_APP_DIRECTORY_DATA_ROLE", "APP_DIRECTORY_LOOKUP_ROLE"),
+            _env("PHASE2_APP_SENSITIVE_DATA_ROLE", "APP_SENSITIVE_LOOKUP_ROLE"),
+        )
+        if role
+    )
+
+
 def load_app_mediated_config(
     env_file: str | Path | None = ".env",
 ) -> tuple[DemoConfig, AppMediatedConfig]:
     """Load Phase 2 application-mediated connection settings."""
     demo_config = load_config(env_file)
-    security_context_mode = _env("APP_SECURITY_CONTEXT_MODE", "local").lower()
-    if security_context_mode != "local":
-        raise ConfigError("APP_SECURITY_CONTEXT_MODE currently supports only local.")
 
+    app_auth_mode = _env("APP_DB_AUTH_MODE", "password").lower()
+    if app_auth_mode not in {"password", "client_credentials"}:
+        raise ConfigError("APP_DB_AUTH_MODE must be password or client_credentials.")
+
+    security_context_mode = _normalized_context_mode()
     app_username = _env("APP_DB_USERNAME", "DEEPSEC_APP")
-    app_password = _env("APP_DB_PASSWORD", "change_me")
+    app_password = _env("APP_DB_PASSWORD", "change_me" if app_auth_mode == "password" else "")
     if not app_username:
         raise ConfigError("APP_DB_USERNAME is required for Phase 2.")
-    if not app_password:
-        raise ConfigError("APP_DB_PASSWORD is required for Phase 2.")
+    if app_auth_mode == "password" and not app_password:
+        raise ConfigError("APP_DB_PASSWORD is required when APP_DB_AUTH_MODE=password.")
+
+    identity_domain_url = _env("IDENTITY_DOMAIN_URL") or None
+    token_url = _env("DEMO_APP_TOKEN_URL") or None
+    demo_app_client_id = _env("DEMO_APP_CLIENT_ID") or None
+    demo_app_client_secret = _env("DEMO_APP_CLIENT_SECRET") or None
+    demo_app_database_scope = _env("DEMO_APP_DATABASE_SCOPE") or None
+    end_user_context_key = _env("APP_END_USER_CONTEXT_KEY") or None
+
+    uses_identity_domain_token = (
+        app_auth_mode == "client_credentials"
+        or security_context_mode == "identity_domain_client_credentials"
+    )
+    if uses_identity_domain_token:
+        missing = [
+            name
+            for name, value in {
+                "IDENTITY_DOMAIN_URL or DEMO_APP_TOKEN_URL": identity_domain_url or token_url,
+                "DEMO_APP_CLIENT_ID": demo_app_client_id,
+                "DEMO_APP_CLIENT_SECRET": demo_app_client_secret,
+                "DEMO_APP_DATABASE_SCOPE": demo_app_database_scope,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise ConfigError(
+                "Missing Identity Domain client-credentials settings: "
+                + ", ".join(missing)
+            )
+    if security_context_mode == "identity_domain_client_credentials" and not end_user_context_key:
+        raise ConfigError("APP_END_USER_CONTEXT_KEY is required for Phase 2 DDS context.")
 
     return demo_config, AppMediatedConfig(
         app_username=app_username,
         app_password=app_password,
+        app_auth_mode=app_auth_mode,
         security_context_mode=security_context_mode,
-        database_access_token=_env("APP_DATABASE_ACCESS_TOKEN") or None,
-        end_user_context_key=_env("APP_END_USER_CONTEXT_KEY") or None,
         context_attributes=_env_json_object("APP_CONTEXT_ATTRIBUTES_JSON"),
+        identity_domain_url=identity_domain_url,
+        demo_app_token_url=token_url,
+        demo_app_client_id=demo_app_client_id,
+        demo_app_client_secret=demo_app_client_secret,
+        demo_app_database_scope=demo_app_database_scope,
+        end_user_context_key=end_user_context_key,
+        application_data_roles=_application_data_roles_from_env(),
+        token_request_timeout=_env_int("APP_TOKEN_REQUEST_TIMEOUT", 10),
     )
 
 

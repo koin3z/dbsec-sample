@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -19,6 +21,10 @@ _PASSWORD_RE = re.compile(
     r"(identified\s+by)\s+(\"(?:\"\"|[^\"])*\"|\S+)",
     flags=re.IGNORECASE,
 )
+_IAM_MAPPING_RE = re.compile(
+    r"^IAM_(?:GROUP_NAME|PRINCIPAL_NAME|PRINCIPAL_OCID)=[A-Za-z0-9][A-Za-z0-9_.:/@+-]*$"
+)
+_SAFE_ENV_LITERAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+=$-]*$")
 
 
 def _sql_identifier(value: str) -> str:
@@ -31,14 +37,121 @@ def _quoted_password(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def _quoted_sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _safe_env_literal(name: str, default: str = "") -> str:
+    value = os.getenv(name, default).strip()
+    if not value:
+        raise ConfigError(f"{name} is required for Phase 2 SQL setup.")
+    if not _SAFE_ENV_LITERAL_RE.match(value):
+        raise ConfigError(
+            f"{name} must not contain spaces, quotes, semicolons, or control characters."
+        )
+    return value
+
+
+def _sql_literal_env(name: str, default: str = "") -> str:
+    return _quoted_sql_literal(_safe_env_literal(name, default))
+
+
+def _sql_secret_literal_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ConfigError(f"{name} is required for Phase 2 SQL setup.")
+    if ";" in value or "\n" in value or "\r" in value:
+        raise ConfigError(f"{name} must not contain semicolons or newlines.")
+    return _quoted_sql_literal(value)
+
+
+def _sql_identifier_env(name: str, default: str) -> str:
+    return _sql_identifier(os.getenv(name, default).strip())
+
+
+def _identity_provider_oauth_config() -> str:
+    payload = {
+        "app_id": _safe_env_literal("IDENTITY_DOMAIN_DATABASE_APP_ID"),
+        "domain_url": _safe_env_literal("IDENTITY_DOMAIN_URL"),
+    }
+    return _quoted_sql_literal(json.dumps(payload, separators=(",", ":")))
+
+
+def _oauth_client_id_mapping() -> str:
+    client_id = _safe_env_literal("DEMO_APP_CLIENT_ID")
+    return _quoted_sql_literal(f"IAM_OAUTH_CLIENT_ID={client_id}")
+
+
+def _iam_mapping(value: str) -> str:
+    if not value:
+        raise ConfigError("APP_IAM_MAPPING is required for IAM global user setup.")
+    if not _IAM_MAPPING_RE.match(value):
+        raise ConfigError(
+            "APP_IAM_MAPPING must be IAM_GROUP_NAME=..., "
+            "IAM_PRINCIPAL_NAME=..., or IAM_PRINCIPAL_OCID=... with no spaces, "
+            "quotes, semicolons, or secrets."
+        )
+    return value
+
+
 def render_template(sql_text: str, config: DemoConfig) -> str:
-    """Render non-secret SQL placeholders from validated configuration."""
+    """Render SQL placeholders from validated configuration."""
     schema = _sql_identifier(config.demo_schema)
-    return (
+    app_username = _sql_identifier_env("APP_DB_USERNAME", "DEEPSEC_APP")
+    rendered = (
         sql_text.replace("{{DEMO_SCHEMA}}", schema)
         .replace("{{DEMO_SCHEMA_LOWER}}", schema.lower())
         .replace("{{DEMO_DEFAULT_PASSWORD}}", _quoted_password(config.default_password))
+        .replace("{{APP_DB_USERNAME}}", app_username)
+        .replace(
+            "{{PHASE2_APP_IDENTITY}}",
+            _sql_identifier_env("PHASE2_APP_IDENTITY", "DEEPSEC_DEMO_APP"),
+        )
+        .replace(
+            "{{PHASE2_APP_DIRECTORY_DATA_ROLE}}",
+            _sql_identifier_env(
+                "PHASE2_APP_DIRECTORY_DATA_ROLE", "APP_DIRECTORY_LOOKUP_ROLE"
+            ),
+        )
+        .replace(
+            "{{PHASE2_APP_SENSITIVE_DATA_ROLE}}",
+            _sql_identifier_env(
+                "PHASE2_APP_SENSITIVE_DATA_ROLE", "APP_SENSITIVE_LOOKUP_ROLE"
+            ),
+        )
     )
+
+    literal_placeholders = {
+        "{{IDENTITY_DOMAIN_URL}}": lambda: _sql_literal_env("IDENTITY_DOMAIN_URL"),
+        "{{IDENTITY_DOMAIN_DATABASE_APP_ID}}": lambda: _sql_literal_env(
+            "IDENTITY_DOMAIN_DATABASE_APP_ID"
+        ),
+        "{{IDENTITY_DOMAIN_DATABASE_CLIENT_ID}}": lambda: _sql_literal_env(
+            "IDENTITY_DOMAIN_DATABASE_CLIENT_ID"
+        ),
+        "{{IDENTITY_DOMAIN_DATABASE_CLIENT_SECRET}}": lambda: _sql_secret_literal_env(
+            "IDENTITY_DOMAIN_DATABASE_CLIENT_SECRET"
+        ),
+        "{{IDENTITY_PROVIDER_OAUTH_CONFIG}}": _identity_provider_oauth_config,
+        "{{DEMO_APP_CLIENT_ID_MAPPING}}": _oauth_client_id_mapping,
+    }
+    for placeholder, value_factory in literal_placeholders.items():
+        if placeholder in rendered:
+            rendered = rendered.replace(placeholder, value_factory())
+
+    if "{{APP_DB_PASSWORD}}" in rendered:
+        app_password = os.getenv("APP_DB_PASSWORD", config.default_password).strip()
+        if not app_password:
+            raise ConfigError("APP_DB_PASSWORD must not be empty.")
+        rendered = rendered.replace("{{APP_DB_PASSWORD}}", _quoted_password(app_password))
+
+    if "{{APP_IAM_MAPPING}}" in rendered:
+        app_iam_mapping = _iam_mapping(os.getenv("APP_IAM_MAPPING", "").strip())
+        rendered = rendered.replace(
+            "{{APP_IAM_MAPPING}}", _quoted_sql_literal(app_iam_mapping)
+        )
+
+    return rendered
 
 
 def iter_statements(sql_text: str) -> Iterable[str]:

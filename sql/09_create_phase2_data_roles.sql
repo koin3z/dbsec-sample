@@ -1,0 +1,14 @@
+-- Phase 2 locally managed Data Roles authorized by application identity.
+-- The application can request only roles granted to its application identity.
+-- Do not use GRANT SELECT on {{DEMO_SCHEMA}}.employees.
+--
+-- Optional .env values:
+-- - PHASE2_APP_IDENTITY, default DEEPSEC_DEMO_APP
+-- - PHASE2_APP_DIRECTORY_DATA_ROLE, default APP_DIRECTORY_LOOKUP_ROLE
+-- - PHASE2_APP_SENSITIVE_DATA_ROLE, default APP_SENSITIVE_LOOKUP_ROLE
+
+CREATE OR REPLACE DATA ROLE {{PHASE2_APP_DIRECTORY_DATA_ROLE}};
+CREATE OR REPLACE DATA ROLE {{PHASE2_APP_SENSITIVE_DATA_ROLE}};
+
+GRANT DATA ROLE {{PHASE2_APP_DIRECTORY_DATA_ROLE}} TO {{PHASE2_APP_IDENTITY}};
+GRANT DATA ROLE {{PHASE2_APP_SENSITIVE_DATA_ROLE}} TO {{PHASE2_APP_IDENTITY}};

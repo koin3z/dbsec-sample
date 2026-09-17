@@ -1,6 +1,6 @@
 # Oracle Deep Data Security デモ
 
-Oracle Database の Deep Data Security を、Python / marimo / python-oracledb から確認するためのデモです。Phase 1 ではローカルのエンドユーザーへ直接ログオンして、同じ SELECT が Data Grant によって異なる結果になることを見せます。Phase 2 では共有アプリケーション DB ユーザーで接続し、選択したエンドユーザーの security context を問い合わせ前に付与して、実行後に必ず解除する流れを別 notebook で示します。
+Oracle Database の Deep Data Security を、Python / marimo / python-oracledb から確認するためのデモです。Phase 1 ではローカルのエンドユーザーへ直接ログオンして、同じ SELECT が Data Grant によって異なる結果になることを見せます。Phase 2 では Identity Domain / OAuth client credentials と Oracle Deep Data Security の application-mediated 構成を扱います。Phase 2 の SQL は DB 側の application identity、Data Role、Data Grant を設定し、Python 側は公式 DDS provider が有効になるまで fail-closed にします。
 
 ```text
 marimo UI
@@ -15,7 +15,7 @@ marimo UI
 - 対象ペルソナは `staff_tokyo`、`manager_tokyo`、`manager_japan`、`ai_assistant` です。
 - Python 側では Deep Data Security の挙動を再現しません。
 - 行・列・セルの制御は DB 側の Data Grant が強制する前提です。
-- Phase 2 の application-mediated 方式は `notebooks/demo_app_mediated.py` に分離しています。OAuth、外部 IAM、AI エージェント本体は実装対象外です。
+- Phase 2 の application-mediated 方式は `notebooks/demo_app_mediated.py` と `sql/07` 以降に分離しています。Python 側で DDS を模倣せず、Identity Domain 連携と Data Grant は DB 側で扱います。
 
 ## 前提
 
@@ -118,22 +118,59 @@ UI でペルソナを選び、同じ canonical SELECT を実行します。期�
 - `ai_assistant`: アクティブ従業員のディレクトリ相当列のみを表示。
 
 
+
 ## Phase 2: application-mediated デモ
 
-Phase 2 は direct logon とは別の notebook です。共有アプリケーション DB ユーザーで Oracle Database に接続し、問い合わせ直前に選択したローカル・エンドユーザーの security context を付与し、`finally` で必ず `clear_end_user_security_context()` を呼びます。接続を再利用する構成で前のユーザーの context を残さないことが主眼です。
+Phase 2 は direct logon とは別の guarded design target です。Identity Domain の OAuth client credentials で database-access token を取得し、python-oracledb の公式 DDS API で end-user security context payload を attach します。DB 側では OAuth client ID を直接 Data Grant の grantee にせず、`APPLICATION IDENTITY -> DATA ROLE -> DATA GRANT` の順に権限を束ねます。
 
 ```bash
 uv run marimo edit notebooks/demo_app_mediated.py
 ```
 
-Phase 2 を実行する前提は次の通りです。
+Phase 2 の `.env` で整理する値は次の通りです。client secret、access token、秘密鍵、wallet material は実値をコミットしません。
 
-- Phase 1 の `00_reset.sql` から `06_validate.sql` までが成功していること。
-- `.env` に `APP_DB_USERNAME`、`APP_DB_PASSWORD`、`APP_SECURITY_CONTEXT_MODE=local` を設定すること。
-- `APP_DATABASE_ACCESS_TOKEN` と `APP_END_USER_CONTEXT_KEY` は対象環境の Oracle Deep Data Security / security context provider の公式手順で取得した値を設定すること。このリポジトリでは実在しない token や IAM 登録手順を生成しません。
-- この notebook が使う python-oracledb の end-user security context payload API は Thin mode を前提にしています。`ORACLE_DRIVER_MODE=thin` で実行してください。接続先が Native Network Encryption などにより Thick mode を必須にする場合は、Phase 2 用に Thin mode で接続できるサービスまたは Oracle 公式手順に沿った別構成が必要です。
+- Identity Domain: `IDENTITY_DOMAIN_URL`
+- DB application registration: `IDENTITY_DOMAIN_DATABASE_APP_ID`、`IDENTITY_DOMAIN_DATABASE_AUDIENCE`、`IDENTITY_DOMAIN_DATABASE_SCOPE_NAME`、`IDENTITY_DOMAIN_DATABASE_SCOPE`、`IDENTITY_DOMAIN_DATABASE_CLIENT_ID`、`IDENTITY_DOMAIN_DATABASE_CLIENT_SECRET`
+- Demo application registration: `DEMO_APP_ID`、`DEMO_APP_CLIENT_ID`、`DEMO_APP_CLIENT_SECRET`、`DEMO_APP_GRANT_TYPES=client_credentials`、`DEMO_APP_DATABASE_SCOPE`、必要なら `DEMO_APP_TOKEN_URL`
+- DB-side DDS names: `PHASE2_APP_IDENTITY`、`PHASE2_APP_DIRECTORY_DATA_ROLE`、`PHASE2_APP_SENSITIVE_DATA_ROLE`
+- Runtime: `APP_DB_AUTH_MODE=client_credentials`、`APP_DB_USERNAME=DEEPSEC_APP`、`APP_SECURITY_CONTEXT_MODE=identity_domain_client_credentials`、`APP_END_USER_CONTEXT_KEY`、`APP_DATA_ROLES`、`APP_CONTEXT_ATTRIBUTES_JSON`、`APP_TOKEN_REQUEST_TIMEOUT`
+- Connectivity: `ORACLE_PROTOCOL=tcps`、wallet/config directory、service name、target DB が Oracle AI Database か Autonomous AI Database か
+Phase 2 の `APP_DB_AUTH_MODE=client_credentials` と `APP_SECURITY_CONTEXT_MODE=identity_domain_client_credentials` は TCPS 前提です。`ORACLE_PROTOCOL=tcp` のままだと、python-oracledb が `DPY-3001: bequeath is only supported in python-oracledb thick mode` のような紛らわしいエラーを返すことがあります。TCPS 用の port、wallet/config directory、証明書設定を対象 DB に合わせてください。
 
-共有アプリ DB ユーザー作成や追加権限は、対象 Oracle Database の Deep Data Security / IAM 構成に依存します。実行が必要な DDL は、公式手順に基づく SQL ファイルとして追加してから `scripts/run_sql.py` で実行してください。このデモでは Phase 1 と同じく、アプリ側で行・列・セルをフィルタせず、通常の `GRANT SELECT ON DEMO_HR.EMPLOYEES` で制御を迂回する構成も追加しません。
+`APP_DB_AUTH_MODE=client_credentials` は、`DEMO_APP_*` から取得した token を `oracledb.connect(access_token=...)` に渡します。対象 DB 側では、その OAuth client が共有 DB ユーザー `DEEPSEC_APP` に解決される global user mapping が必要です。`APP_SECURITY_CONTEXT_MODE=identity_domain_client_credentials` は、同じ Identity Domain token を `create_end_user_security_context()` の `database_access_token` に渡し、`APP_END_USER_CONTEXT_KEY` と選択ペルソナで local end-user identity tuple を作ります。
+
+Phase 2 SQL は Phase 1 の direct-logon SQL とは別に実行します。Identity Domain の有効化は対象 DB 種別でファイルが異なるため、どちらか一方だけを選びます。
+
+```bash
+# Oracle AI Database の場合
+uv run python scripts/run_sql.py --file sql/07_configure_identity_domain.sql --dry-run
+uv run python scripts/run_sql.py --file sql/07_configure_identity_domain.sql
+
+# Autonomous AI Database の場合
+uv run python scripts/run_sql.py --file sql/07_configure_identity_domain_autonomous.sql --dry-run
+uv run python scripts/run_sql.py --file sql/07_configure_identity_domain_autonomous.sql
+```
+
+続いて、application identity と Phase 2 用 Data Role / Data Grant を作成します。
+
+```bash
+uv run python scripts/run_sql.py --file sql/08_create_application_identity.sql
+uv run python scripts/run_sql.py --file sql/09_create_phase2_data_roles.sql
+uv run python scripts/run_sql.py --file sql/10_create_phase2_data_grants.sql
+uv run python scripts/run_sql.py --file sql/11_validate_phase2.sql
+```
+
+`sql/11_validate_phase2.sql` は、DDS 関連 dictionary view の列名が Oracle 26ai のビルドやパッチで変わっても確認できるよう、まず `ALL_TAB_COLUMNS` で列一覧を表示し、その後 `SELECT *` で metadata を表示します。
+
+`sql/10_create_phase2_data_grants.sql` は、アクティブ従業員の directory lookup を application-scoped role に許可し、機微列の lookup は `ORA_END_USER_CONTEXT.username` が検証されたときだけ自分の行に一致するようにしています。Python 側で行フィルタや列マスクは実装しません。通常の `GRANT SELECT ON DEMO_HR.EMPLOYEES` も付与しません。
+
+`sql/07_create_shared_app_user.sql` は、DB logon token 用の global user mapping を DB 側で作る optional file です。`APP_IAM_MAPPING` はこの SQL の `IDENTIFIED GLOBALLY AS ...` に埋め込む descriptor で、Data Grant や application identity の grantee には使いません。対象環境ですでに `DEEPSEC_APP` の mapping がある場合、この SQL は不要です。
+
+```bash
+uv run python scripts/phase2_status.py
+```
+
+この確認は設定済みの DB auth mode で共有 DB ユーザーに接続し、`SESSION_USER`、`CURRENT_USER`、`ORA_END_USER_CONTEXT.username` の状態を表示します。provider が未検証の場合、protected query は実行されません。notebook の protected query は `ORA_END_USER_CONTEXT.username` が選択ペルソナと一致することを確認してから実行し、`finally` で context を clear します。
 
 ## 検証
 
